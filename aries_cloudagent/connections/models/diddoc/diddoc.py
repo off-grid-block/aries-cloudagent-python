@@ -27,6 +27,7 @@ from .publickey import PublicKey, PublicKeyType
 from .service import Service
 from .util import canon_did, canon_ref, ok_did, resource
 
+
 LOGGER = logging.getLogger(__name__)
 
 

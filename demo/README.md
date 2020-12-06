@@ -16,8 +16,6 @@ There are several demos available for ACA-Py mostly (but not only) aimed at deve
     - [Optional: Run a von-network ledger browser](#optional-run-a-von-network-ledger-browser)
     - [Run the Alice and Faber Controllers/Agents](#run-the-alice-and-faber-controllersagents)
   - [Follow The Script](#follow-the-script)
-    - [Exchanging Messages](#exchanging-messages)
-    - [Issuing and Proving Credentials](#issuing-and-proving-credentials)
 - [Learning about the Alice/Faber code](#learning-about-the-alicefaber-code)
 - [OpenAPI (Swagger) Demo](#openapi-swagger-demo)
 - [Performance Demo](#performance-demo)
@@ -159,11 +157,7 @@ Alice:
     x = Exit - stop and exit
 ```
 
-#### Exchanging Messages
-
 Feel free to use the "3" option to send messages back and forth between the agents. Fun, eh? Those are secure, end-to-end encrypted messages.
-
-#### Issuing and Proving Credentials
 
 When ready to test the credentials exchange protocols, go to the Faber prompt, enter "1" to send a credential, and then "2" to request a proof.
 
@@ -173,7 +167,7 @@ You don't need to do anything with Alice's agent - her agent is implemented to a
 
 These Alice and Faber scripts (in the `demo/runners` folder) implement the controller and run the agent as a sub-process (see the documentation for `aca-py`). The controller publishes a REST service to receive web hook callbacks from their agent. Note that this architecture, running the agent as a sub-process, is a variation on the documented architecture of running the controller and agent as separate processes/containers.
 
-The controllers for this demo can be found in the [alice.py](runners/alice.py) and [faber.py](runners/faber.py) files. Alice and Faber are instances of the agent class found in [agent.py](runners/support/agent.py).
+The controllers for this demo can be found in the [alice.py](runners/alice.py) and [faber.py](runners/faber.py) files. You can watch [this video](https://zoom.us/recording/share/hfGCVMRsYWQcObOUjTQBd1vRxSH3sldO4QbEjWYjiS6wIumekTziMw) to get a start in understanding what is going on (and where) in the controllers.
 
 ## OpenAPI (Swagger) Demo
 
@@ -190,7 +184,7 @@ To run the demo, make sure that you shut down any running Alice/Faber agents. Th
 
 The script starts both agents, runs the performance test, spits out performance results and shuts down the agents. Note that this is just one demonstration of how performance metrics tracking can be done with ACA-Py.
 
-A second version of the performance test can be run by adding the parameter `--routing` to the invocation above. The parameter triggers the example to run with Alice using a routing agent such that all messages pass through the routing agent between Alice and Faber. This is a good, simple example of how routing can be implemented with DIDComm agents.
+A second version of the performance test can be run by adding the parameter `--router` to the invocation above. The parameter triggers the example to run with Alice using a routing agent such that all messages pass through the routing agent between Alice and Faber. This is a good, simple example of how routing can be implemented with DIDComm agents.
 
 ## Coding Challenge: Adding ACME
 

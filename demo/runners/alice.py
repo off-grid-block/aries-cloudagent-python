@@ -1,11 +1,23 @@
+# ************Edited Beginning************
+# File created for Yale research
+#     by Ashlin, Minto, Athul Antony
+# This is for multple client implementation
+# ************Edited End******************
+
 import asyncio
+import argparse
 import base64
 import binascii
 import json
 import logging
 import os
 import sys
+import json
 from urllib.parse import urlparse
+
+from aiohttp import web, ClientSession, DummyCookieJar
+from aiohttp_apispec import docs, response_schema, setup_aiohttp_apispec
+import aiohttp_cors
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # noqa
 
@@ -23,19 +35,17 @@ from runners.support.utils import (
 
 LOGGER = logging.getLogger(__name__)
 
-
-class AliceAgent(DemoAgent):
-    def __init__(
-        self, http_port: int, admin_port: int, no_auto: bool = False, **kwargs
-    ):
+temp_message=None
+temp_data=None
+agent = None
+class ClientAgent(DemoAgent):
+    def __init__(self, label, http_port: int, admin_port: int, **kwargs):
         super().__init__(
-            "Alice.Agent",
+            label,
             http_port,
             admin_port,
-            prefix="Alice",
-            extra_args=[]
-            if no_auto
-            else [
+            prefix="Client",
+            extra_args=[
                 "--auto-accept-invites",
                 "--auto-accept-requests",
                 "--auto-store-credential",
@@ -55,9 +65,11 @@ class AliceAgent(DemoAgent):
         return self._connection_ready.done() and self._connection_ready.result()
 
     async def handle_connections(self, message):
+        global temp_message
         if message["connection_id"] == self.connection_id:
             if message["state"] == "active" and not self._connection_ready.done():
                 self.log("Connected")
+                temp_message=message
                 self._connection_ready.set_result(True)
 
     async def handle_issue_credential(self, message):
@@ -78,12 +90,12 @@ class AliceAgent(DemoAgent):
         if state == "offer_received":
             log_status("#15 After receiving credential offer, send credential request")
             await self.admin_POST(
-                f"/issue-credential/records/{credential_exchange_id}/send-request"
+                "/issue-credential/records/" f"{credential_exchange_id}/send-request"
             )
 
         elif state == "credential_acked":
+            self.log("Stored credential {cred_id} in wallet")
             cred_id = message["credential_id"]
-            self.log(f"Stored credential {cred_id} in wallet")
             log_status(f"#18.1 Stored credential {cred_id} in wallet")
             resp = await self.admin_GET(f"/credential/{cred_id}")
             log_json(resp, label="Credential details:")
@@ -123,11 +135,7 @@ class AliceAgent(DemoAgent):
                 f"/present-proof/records/{presentation_exchange_id}/credentials"
             )
             if credentials:
-                for row in sorted(
-                    credentials,
-                    key=lambda c: int(c["cred_info"]["attrs"]["timestamp"]),
-                    reverse=True,
-                ):
+                for row in credentials:
                     for referent in row["presentation_referents"]:
                         if referent not in credentials_by_reft:
                             credentials_by_reft[referent] = row
@@ -148,7 +156,8 @@ class AliceAgent(DemoAgent):
                     predicates[referent] = {
                         "cred_id": credentials_by_reft[referent]["cred_info"][
                             "referent"
-                        ]
+                        ],
+                        "revealed": True,
                     }
 
             log_status("#25 Generate the proof")
@@ -168,172 +177,87 @@ class AliceAgent(DemoAgent):
             )
 
     async def handle_basicmessages(self, message):
-        self.log("Received message:", message["content"])
+        global temp_data
+        print(json.loads(message["content"]))
+        temp_data=json.loads(message["content"])
 
 
-async def input_invitation(agent):
-    async for details in prompt_loop("Invite details: "):
-        b64_invite = None
-        try:
-            url = urlparse(details)
-            query = url.query
-            if query and "c_i=" in query:
-                pos = query.index("c_i=") + 4
-                b64_invite = query[pos:]
-            else:
-                b64_invite = details
-        except ValueError:
-            b64_invite = details
-
-        if b64_invite:
-            try:
-                padlen = 4 - len(b64_invite) % 4
-                if padlen <= 2:
-                    b64_invite += "=" * padlen
-                invite_json = base64.urlsafe_b64decode(b64_invite)
-                details = invite_json.decode("utf-8")
-            except binascii.Error:
-                pass
-            except UnicodeDecodeError:
-                pass
-
-        if details:
-            try:
-                json.loads(details)
-                break
-            except json.JSONDecodeError as e:
-                log_msg("Invalid invitation:", str(e))
-
-    with log_timer("Connect duration:"):
-        connection = await agent.admin_POST("/connections/receive-invitation", details)
-        agent.connection_id = connection["connection_id"]
-        log_json(connection, label="Invitation response:")
-
-        await agent.detect_connection()
+async def handle_input_invitation(request):
+    global agent
+    data = await request.json()
+    details = data['invitation']
+    connection = await agent.admin_POST("/connections/receive-invitation", details)
+    agent.connection_id = connection["connection_id"]
+    log_json(connection, label="Invitation response:")
+    await agent.detect_connection()
 
 
-async def main(start_port: int, no_auto: bool = False, show_timing: bool = False):
-
+async def main(start_port: int, show_timing: bool = False, container_name: str = "Simple_client"):
+    global temp_message
+    global temp_data
+    global agent
     genesis = await default_genesis_txns()
     if not genesis:
         print("Error retrieving ledger genesis transactions")
         sys.exit(1)
-
-    agent = None
-
     try:
         log_status("#7 Provision an agent and wallet, get back configuration details")
-        agent = AliceAgent(
-            start_port,
-            start_port + 1,
-            genesis_data=genesis,
-            no_auto=no_auto,
-            timing=show_timing,
+        label=container_name
+        agent = ClientAgent(
+            label, start_port, start_port + 1, genesis_data=genesis, timing=show_timing
         )
         await agent.listen_webhooks(start_port + 2)
 
         with log_timer("Startup duration:"):
             await agent.start_process()
-        log_msg("Admin URL is at:", agent.admin_url)
-        log_msg("Endpoint URL is at:", agent.endpoint)
+        log_msg("Admin url is at:", agent.admin_url)
+        log_msg("Endpoint url is at:", agent.endpoint)
+        app = web.Application()
 
-        log_status("#9 Input faber.py invitation details")
-        await input_invitation(agent)
+        app.add_routes([
+            web.post('/input_invitation', handle_input_invitation),
+        ])
 
-        async for option in prompt_loop(
-            "   (3) Send Message\n"
-            "   (4) Input New Invitation\n"
-            "   (X) Exit?\n"
-            "[3/4/X]: "
-        ):
-            if option is not None:
-                option = option.strip()
+        cors = aiohttp_cors.setup(
+            app,
+            defaults={
+                "*": aiohttp_cors.ResourceOptions(
+                    allow_credentials=True,
+                    expose_headers="*",
+                    allow_headers="*",
+                    allow_methods="*",
+                )
+            },
+        )
+        for route in app.router.routes():
+            cors.add(route)
 
-            if option is None or option in "xX":
-                break
-            elif option == "3":
-                msg = await prompt("Enter message: ")
-                if msg:
-                    await agent.admin_POST(
-                        f"/connections/{agent.connection_id}/send-message",
-                        {"content": msg},
-                    )
-            elif option == "4":
-                # handle new invitation
-                log_status("Input new invitation details")
-                await input_invitation(agent)
-
-        if show_timing:
-            timing = await agent.fetch_timing()
-            if timing:
-                for line in agent.format_timing(timing):
-                    log_msg(line)
-
-    finally:
-        terminated = True
-        try:
-            if agent:
-                await agent.terminate()
-        except Exception:
-            LOGGER.exception("Error terminating agent:")
-            terminated = False
-
-    await asyncio.sleep(0.1)
-
-    if not terminated:
-        os._exit(1)
-
+        return app
+    except Exception:
+        print("Error when starting to run server!!")
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Runs an Alice demo agent.")
-    parser.add_argument("--no-auto", action="store_true", help="Disable auto issuance")
+    parser = argparse.ArgumentParser(description="Runs an Client demo agent.")
     parser.add_argument(
         "-p",
         "--port",
         type=int,
-        default=8030,
         metavar=("<port>"),
         help="Choose the starting port number to listen on",
     )
     parser.add_argument(
         "--timing", action="store_true", help="Enable timing information"
     )
+    parser.add_argument(
+        "--container"
+    )
     args = parser.parse_args()
-
-    ENABLE_PYDEVD_PYCHARM = os.getenv("ENABLE_PYDEVD_PYCHARM", "").lower()
-    ENABLE_PYDEVD_PYCHARM = ENABLE_PYDEVD_PYCHARM and ENABLE_PYDEVD_PYCHARM not in (
-        "false",
-        "0",
-    )
-    PYDEVD_PYCHARM_HOST = os.getenv("PYDEVD_PYCHARM_HOST", "localhost")
-    PYDEVD_PYCHARM_CONTROLLER_PORT = int(
-        os.getenv("PYDEVD_PYCHARM_CONTROLLER_PORT", 5001)
-    )
-
-    if ENABLE_PYDEVD_PYCHARM:
-        try:
-            import pydevd_pycharm
-
-            print(
-                f"Alice remote debugging to {PYDEVD_PYCHARM_HOST}:{PYDEVD_PYCHARM_CONTROLLER_PORT}"
-            )
-            pydevd_pycharm.settrace(
-                host=PYDEVD_PYCHARM_HOST,
-                port=PYDEVD_PYCHARM_CONTROLLER_PORT,
-                stdoutToServer=True,
-                stderrToServer=True,
-                suspend=False,
-            )
-        except ImportError:
-            print("pydevd_pycharm library was not found")
-
     require_indy()
-
     try:
-        asyncio.get_event_loop().run_until_complete(
-            main(args.port, args.no_auto, args.timing)
-        )
+        web.run_app(main(args.port, args.timing, args.container), host='0.0.0.0', port=(args.port+3))
     except KeyboardInterrupt:
         os._exit(1)
+
+
+
+

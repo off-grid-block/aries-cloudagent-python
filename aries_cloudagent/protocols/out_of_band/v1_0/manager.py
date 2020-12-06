@@ -2,7 +2,7 @@
 
 import logging
 
-from ....connections.models.conn_record import ConnRecord
+from ....connections.models.connection_record import ConnectionRecord
 from ....config.injection_context import InjectionContext
 from ....core.error import BaseError
 from ....ledger.base import BaseLedger
@@ -177,7 +177,9 @@ class OutOfBandManager:
 
         return invitation_model
 
-    async def receive_invitation(self, invitation: InvitationMessage) -> ConnRecord:
+    async def receive_invitation(
+        self, invitation: InvitationMessage
+    ) -> ConnectionRecord:
         """Receive an out of band invitation message."""
 
         ledger: BaseLedger = await self.context.inject(BaseLedger)

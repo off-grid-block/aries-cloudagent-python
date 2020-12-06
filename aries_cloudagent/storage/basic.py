@@ -3,13 +3,9 @@
 from collections import OrderedDict
 from typing import Mapping, Sequence
 
-from .base import (
-    DEFAULT_PAGE_SIZE,
-    BaseStorage,
-    BaseStorageRecordSearch,
-    validate_record,
-)
+from .base import BaseStorage, BaseStorageRecordSearch
 from .error import (
+    StorageError,
     StorageDuplicateError,
     StorageNotFoundError,
     StorageSearchError,
@@ -43,7 +39,10 @@ class BasicStorage(BaseStorage):
             StorageError: If the record has no ID
 
         """
-        validate_record(record)
+        if not record:
+            raise StorageError("No record provided")
+        if not record.id:
+            raise StorageError("Record has no ID")
         if record.id in self._records:
             raise StorageDuplicateError("Duplicate record")
         self._records[record.id] = record
@@ -72,24 +71,63 @@ class BasicStorage(BaseStorage):
         if not row:
             raise StorageNotFoundError("Record not found: {}".format(record_id))
 
-    async def update_record(self, record: StorageRecord, value: str, tags: Mapping):
+    async def update_record_value(self, record: StorageRecord, value: str):
         """
         Update an existing stored record's value.
 
         Args:
             record: `StorageRecord` to update
             value: The new value
-            tags: The new tags
 
         Raises:
             StorageNotFoundError: If record not found
 
         """
-        validate_record(record)
         oldrec = self._records.get(record.id)
         if not oldrec:
             raise StorageNotFoundError("Record not found: {}".format(record.id))
-        self._records[record.id] = oldrec._replace(value=value, tags=tags)
+        self._records[record.id] = oldrec._replace(value=value)
+
+    async def update_record_tags(self, record: StorageRecord, tags: Mapping):
+        """
+        Update an existing stored record's tags.
+
+        Args:
+            record: `StorageRecord` to update
+            tags: New tags
+
+        Raises:
+            StorageNotFoundError: If record not found
+
+        """
+        oldrec = self._records.get(record.id)
+        if not oldrec:
+            raise StorageNotFoundError("Record not found: {}".format(record.id))
+        self._records[record.id] = oldrec._replace(tags=dict(tags or {}))
+
+    async def delete_record_tags(
+        self, record: StorageRecord, tags: (Sequence, Mapping)
+    ):
+        """
+        Update an existing stored record's tags.
+
+        Args:
+            record: `StorageRecord` to delete
+            tags: Tags
+
+        Raises:
+            StorageNotFoundError: If record not found
+
+        """
+        oldrec = self._records.get(record.id)
+        if not oldrec:
+            raise StorageNotFoundError("Record not found: {}".format(record.id))
+        newtags = dict(oldrec.tags or {})
+        if tags:
+            for tag in tags:
+                if tag in newtags:
+                    del newtags[tag]
+        self._records[record.id] = oldrec._replace(tags=newtags)
 
     async def delete_record(self, record: StorageRecord):
         """
@@ -102,7 +140,6 @@ class BasicStorage(BaseStorage):
             StorageNotFoundError: If record not found
 
         """
-        validate_record(record, delete=True)
         if record.id not in self._records:
             raise StorageNotFoundError("Record not found: {}".format(record.id))
         del self._records[record.id]
@@ -162,7 +199,7 @@ def basic_tag_value_match(value: str, match: dict) -> bool:
             chk = float(value) <= float(cmp_val)
         # elif op == "$like":  NYI
         else:
-            raise StorageSearchError(f"Unsupported match operator: {op}")
+            raise StorageSearchError("Unsupported match operator: ".format(op))
     return chk
 
 
@@ -223,34 +260,40 @@ class BasicStorageRecordSearch(BaseStorageRecordSearch):
             options: Dictionary of backend-specific options
 
         """
-        self._cache = store._records.copy()
-        self._iter = iter(self._cache)
-        self.page_size = page_size or DEFAULT_PAGE_SIZE
-        self.tag_query = tag_query
-        self.type_filter = type_filter
+        super().__init__(store, type_filter, tag_query, page_size, options)
+        self._cache = None
+        self._iter = None
 
-    async def fetch(self, max_count: int = None) -> Sequence[StorageRecord]:
+    @property
+    def opened(self) -> bool:
+        """
+        Accessor for open state.
+
+        Returns:
+            True if opened, else False
+
+        """
+        return self._cache is not None
+
+    async def fetch(self, max_count: int) -> Sequence[StorageRecord]:
         """
         Fetch the next list of results from the store.
 
         Args:
-            max_count: Max number of records to return. If not provided,
-              defaults to the backend's preferred page size
+            max_count: Max number of records to return
 
         Returns:
-            A list of `StorageRecord` instances
+            A list of `StorageRecord`
 
         Raises:
             StorageSearchError: If the search query has not been opened
 
         """
-        if self._cache is None:
-            raise StorageSearchError("Search query is complete")
-
+        if not self.opened:
+            raise StorageSearchError("Search query has not been opened")
         ret = []
         check_type = self.type_filter
-        i = max_count or self.page_size
-
+        i = max_count
         while i > 0:
             try:
                 id = next(self._iter)
@@ -262,11 +305,12 @@ class BasicStorageRecordSearch(BaseStorageRecordSearch):
             ):
                 ret.append(record)
                 i -= 1
-
-        if not ret:
-            self._cache = None
-
         return ret
+
+    async def open(self):
+        """Start the search query."""
+        self._cache = self._store._records.copy()
+        self._iter = iter(self._cache)
 
     async def close(self):
         """Dispose of the search query."""

@@ -1,6 +1,7 @@
 from asynctest import TestCase as AsyncTestCase
 
 from aries_cloudagent.config.injection_context import InjectionContext
+from aries_cloudagent.connections.models.connection_record import ConnectionRecord
 from aries_cloudagent.messaging.responder import MockResponder
 from aries_cloudagent.storage.base import BaseStorage
 from aries_cloudagent.storage.basic import BasicStorage

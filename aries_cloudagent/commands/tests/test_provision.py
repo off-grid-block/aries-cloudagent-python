@@ -2,23 +2,22 @@ from asynctest import TestCase as AsyncTestCase
 from asynctest import mock as async_mock
 import pytest
 
-from ...config.base import ConfigError
 from ...config.error import ArgsParseError
-from .. import provision as test_module
+from .. import provision as command
 
 
 class TestProvision(AsyncTestCase):
     def test_bad_calls(self):
         with self.assertRaises(ArgsParseError):
-            test_module.execute([])
+            command.execute([])
 
         with self.assertRaises(SystemExit):
-            test_module.execute(["bad"])
+            command.execute(["bad"])
 
     @pytest.mark.indy
     def test_provision_wallet(self):
         test_seed = "testseed000000000000000000000001"
-        test_module.execute(
+        command.execute(
             [
                 "--wallet-type",
                 "indy",
@@ -36,25 +35,17 @@ class TestProvision(AsyncTestCase):
 
     async def test_provision_ledger_configured(self):
         with async_mock.patch.object(
-            test_module, "wallet_config", async_mock.CoroutineMock()
+            command, "wallet_config", async_mock.CoroutineMock()
         ) as mock_wallet_config, async_mock.patch.object(
-            test_module, "ledger_config", async_mock.CoroutineMock(return_value=True)
+            command, "ledger_config", async_mock.CoroutineMock(return_value=True)
         ) as mock_ledger_config:
-            await test_module.provision({})
-
-    async def test_provision_config_x(self):
-        with async_mock.patch.object(
-            test_module, "wallet_config", async_mock.CoroutineMock()
-        ) as mock_wallet_config:
-            mock_wallet_config.side_effect = ConfigError("oops")
-            with self.assertRaises(test_module.ProvisionError):
-                await test_module.provision({})
+            await command.provision({})
 
     def test_main(self):
         with async_mock.patch.object(
-            test_module, "__name__", "__main__"
+            command, "__name__", "__main__"
         ) as mock_name, async_mock.patch.object(
-            test_module, "execute", async_mock.MagicMock()
+            command, "execute", async_mock.MagicMock()
         ) as mock_execute:
-            test_module.main()
+            command.main()
             mock_execute.assert_called_once

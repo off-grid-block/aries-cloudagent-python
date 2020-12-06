@@ -1,15 +1,16 @@
-"""Utilities for dealing with Indy conventions."""
+"""Libindy utility functions."""
 
-from os import getenv, listdir, makedirs, urandom
+from os import getenv, listdir, makedirs
 from os.path import isdir, join
 from pathlib import Path
 from platform import system
 
+from indy.anoncreds import generate_nonce
 
-async def generate_pr_nonce() -> str:
+
+async def generate_pr_nonce():
     """Generate a nonce for a proof request."""
-    # equivalent to indy.anoncreds.generate_nonce
-    return str(int.from_bytes(urandom(10), "big"))
+    return await generate_nonce()
 
 
 def indy_client_dir(subpath: str = None, create: bool = False) -> str:

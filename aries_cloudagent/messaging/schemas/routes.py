@@ -14,7 +14,7 @@ from aiohttp_apispec import (
 from marshmallow import fields
 from marshmallow.validate import Regexp
 
-from ...indy.issuer import IndyIssuer, IndyIssuerError
+from ...issuer.base import BaseIssuer, IssuerError
 from ...ledger.base import BaseLedger
 from ...ledger.error import LedgerError
 from ...storage.base import BaseStorage
@@ -71,7 +71,7 @@ class SchemaSchema(OpenAPISchema):
         description="Schema attribute names",
         data_key="attrNames",
     )
-    seqNo = fields.Int(description="Schema sequence number", strict=True, **NATURAL_NUM)
+    seqNo = fields.Int(description="Schema sequence number", **NATURAL_NUM)
 
 
 class SchemaGetResultsSchema(OpenAPISchema):
@@ -113,6 +113,7 @@ async def schemas_send_schema(request: web.BaseRequest):
         The schema id sent
 
     """
+
     context = request.app["request_context"]
 
     body = await request.json()
@@ -128,7 +129,7 @@ async def schemas_send_schema(request: web.BaseRequest):
             reason += ": missing wallet-type?"
         raise web.HTTPForbidden(reason=reason)
 
-    issuer: IndyIssuer = await context.inject(IndyIssuer)
+    issuer: BaseIssuer = await context.inject(BaseIssuer)
     async with ledger:
         try:
             schema_id, schema_def = await shield(
@@ -136,7 +137,7 @@ async def schemas_send_schema(request: web.BaseRequest):
                     issuer, schema_name, schema_version, attributes
                 )
             )
-        except (IndyIssuerError, LedgerError) as err:
+        except (IssuerError, LedgerError) as err:
             raise web.HTTPBadRequest(reason=err.roll_up) from err
 
     return web.json_response({"schema_id": schema_id, "schema": schema_def})

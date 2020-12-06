@@ -58,12 +58,10 @@ class NonRevocationIntervalSchema(BaseModelSchema):
         required=False,
         description="Earliest time of interest in non-revocation interval",
         data_key="from",
-        strict=True,
         **INT_EPOCH
     )
     to = fields.Int(
         required=False,
         description="Latest time of interest in non-revocation interval",
-        strict=True,
         **INT_EPOCH
     )

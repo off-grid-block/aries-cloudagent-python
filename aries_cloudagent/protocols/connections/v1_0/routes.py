@@ -1,6 +1,8 @@
 """Connection handling admin routes."""
 
 import json
+import base64
+# import logging
 
 from aiohttp import web
 from aiohttp_apispec import (
@@ -13,7 +15,10 @@ from aiohttp_apispec import (
 
 from marshmallow import fields, validate, validates_schema
 
-from ....connections.models.conn_record import ConnRecord, ConnRecordSchema
+from ....connections.models.connection_record import (
+    ConnectionRecord,
+    ConnectionRecordSchema,
+)
 from ....messaging.models.base import BaseModelError
 from ....messaging.models.openapi import OpenAPISchema
 from ....messaging.valid import (
@@ -25,6 +30,11 @@ from ....messaging.valid import (
 from ....storage.error import StorageError, StorageNotFoundError
 from ....wallet.error import WalletError
 
+from ....wallet.base import BaseWallet
+from ....ledger.base import BaseLedger
+from ....ledger.error import LedgerError
+import indy
+
 from .manager import ConnectionManager, ConnectionManagerError
 from .message_types import SPEC_URI
 from .messages.connection_invitation import (
@@ -32,12 +42,17 @@ from .messages.connection_invitation import (
     ConnectionInvitationSchema,
 )
 
+# LOGGER = logging.getLogger(__name__)
+# LOGGING_HANDLER = logging.StreamHandler()
+# LOGGING_HANDLER.setLevel(logging.DEBUG)
+# LOGGER.addHandler(LOGGING_HANDLER)
+
 
 class ConnectionListSchema(OpenAPISchema):
     """Result schema for connection list."""
 
     results = fields.List(
-        fields.Nested(ConnRecordSchema()),
+        fields.Nested(ConnectionRecordSchema()),
         description="List of connection records",
     )
 
@@ -48,26 +63,6 @@ class ReceiveInvitationRequestSchema(ConnectionInvitationSchema):
     @validates_schema
     def validate_fields(self, data, **kwargs):
         """Bypass middleware field validation."""
-
-
-class InvitationConnectionTargetRequestSchema(OpenAPISchema):
-    """Request schema for invitation connection target."""
-
-    recipient_keys = fields.List(
-        fields.Str(description="Recipient public key", **INDY_RAW_PUBLIC_KEY),
-        required=False,
-        description="List of recipient keys",
-    )
-    service_endpoint = fields.Str(
-        required=False,
-        description="Connection endpoint",
-        example="http://192.168.56.102:8020",
-    )
-    routing_keys = fields.List(
-        fields.Str(description="Routing key", **INDY_RAW_PUBLIC_KEY),
-        required=False,
-        description="List of routing keys",
-    )
 
 
 class InvitationResultSchema(OpenAPISchema):
@@ -96,6 +91,11 @@ class ConnectionStaticRequestSchema(OpenAPISchema):
     their_endpoint = fields.Str(
         description="URL endpoint for the other party", required=False, **ENDPOINT
     )
+    their_role = fields.Str(
+        description="Role to assign to this connection",
+        required=False,
+        example="Point of contact",
+    )
     their_label = fields.Str(
         description="Label to assign to this connection", required=False
     )
@@ -114,7 +114,7 @@ class ConnectionStaticResultSchema(OpenAPISchema):
     their_verkey = fields.Str(
         description="Remote verification key", required=True, **INDY_RAW_PUBLIC_KEY
     )
-    record = fields.Nested(ConnRecordSchema, required=True)
+    record = fields.Nested(ConnectionRecordSchema, required=True)
 
 
 class ConnectionsListQueryStringSchema(OpenAPISchema):
@@ -125,6 +125,11 @@ class ConnectionsListQueryStringSchema(OpenAPISchema):
         required=False,
         example="Barry",
     )
+    initiator = fields.Str(
+        description="Connection initiator",
+        required=False,
+        validate=validate.OneOf(["self", "external"]),
+    )
     invitation_key = fields.Str(
         description="invitation key", required=False, **INDY_RAW_PUBLIC_KEY
     )
@@ -133,17 +138,18 @@ class ConnectionsListQueryStringSchema(OpenAPISchema):
         description="Connection state",
         required=False,
         validate=validate.OneOf(
-            {label for state in ConnRecord.State for label in state.value}
+            [
+                getattr(ConnectionRecord, m)
+                for m in vars(ConnectionRecord)
+                if m.startswith("STATE_")
+            ]
         ),
     )
     their_did = fields.Str(description="Their DID", required=False, **INDY_DID)
     their_role = fields.Str(
-        description="Their role in the connection protocol",
+        description="Their assigned connection role",
         required=False,
-        validate=validate.OneOf(
-            [label for role in ConnRecord.Role for label in role.value]
-        ),
-        example=ConnRecord.Role.REQUESTER.rfc160,
+        example="Point of contact",
     )
 
 
@@ -220,15 +226,12 @@ class ConnIdRefIdMatchInfoSchema(OpenAPISchema):
 
 def connection_sort_key(conn):
     """Get the sorting key for a particular connection."""
-
-    conn_rec_state = ConnRecord.State.get(conn["state"])
-    if conn_rec_state is ConnRecord.State.ABANDONED:
+    if conn["state"] == ConnectionRecord.STATE_INACTIVE:
         pfx = "2"
-    elif conn_rec_state is ConnRecord.State.INVITATION:
+    elif conn["state"] == ConnectionRecord.STATE_INVITATION:
         pfx = "1"
     else:
         pfx = "0"
-
     return pfx + conn["created_at"]
 
 
@@ -250,7 +253,6 @@ async def connections_list(request: web.BaseRequest):
 
     """
     context = request.app["request_context"]
-
     tag_filter = {}
     for param_name in (
         "invitation_id",
@@ -260,34 +262,27 @@ async def connections_list(request: web.BaseRequest):
     ):
         if param_name in request.query and request.query[param_name] != "":
             tag_filter[param_name] = request.query[param_name]
-
     post_filter = {}
-    if request.query.get("alias"):
-        post_filter["alias"] = request.query["alias"]
-    if request.query.get("state"):
-        post_filter["state"] = [
-            v for v in ConnRecord.State.get(request.query["state"]).value
-        ]
-    if request.query.get("their_role"):
-        post_filter["their_role"] = [
-            v for v in ConnRecord.Role.get(request.query["their_role"]).value
-        ]
-
+    for param_name in (
+        "alias",
+        "initiator",
+        "state",
+        "their_role",
+    ):
+        if param_name in request.query and request.query[param_name] != "":
+            post_filter[param_name] = request.query[param_name]
     try:
-        records = await ConnRecord.query(
-            context, tag_filter, post_filter_positive=post_filter, alt=True
-        )
+        records = await ConnectionRecord.query(context, tag_filter, post_filter)
         results = [record.serialize() for record in records]
         results.sort(key=connection_sort_key)
     except (StorageError, BaseModelError) as err:
         raise web.HTTPBadRequest(reason=err.roll_up) from err
-
     return web.json_response({"results": results})
 
 
 @docs(tags=["connection"], summary="Fetch a single connection record")
 @match_info_schema(ConnIdMatchInfoSchema())
-@response_schema(ConnRecordSchema(), 200)
+@response_schema(ConnectionRecordSchema(), 200)
 async def connections_retrieve(request: web.BaseRequest):
     """
     Request handler for fetching a single connection record.
@@ -303,7 +298,7 @@ async def connections_retrieve(request: web.BaseRequest):
     connection_id = request.match_info["conn_id"]
 
     try:
-        record = await ConnRecord.retrieve_by_id(context, connection_id)
+        record = await ConnectionRecord.retrieve_by_id(context, connection_id)
         result = record.serialize()
     except StorageNotFoundError as err:
         raise web.HTTPNotFound(reason=err.roll_up) from err
@@ -318,7 +313,6 @@ async def connections_retrieve(request: web.BaseRequest):
     summary="Create a new connection invitation",
 )
 @querystring_schema(CreateInvitationQueryStringSchema())
-@request_schema(InvitationConnectionTargetRequestSchema())
 @response_schema(InvitationResultSchema(), 200)
 async def connections_create_invitation(request: web.BaseRequest):
     """
@@ -336,10 +330,6 @@ async def connections_create_invitation(request: web.BaseRequest):
     alias = request.query.get("alias")
     public = json.loads(request.query.get("public", "false"))
     multi_use = json.loads(request.query.get("multi_use", "false"))
-    body = await request.json() if request.body_exists else {}
-    recipient_keys = body.get("recipient_keys")
-    service_endpoint = body.get("service_endpoint")
-    routing_keys = body.get("routing_keys")
 
     if public and not context.settings.get("public_invites"):
         raise web.HTTPForbidden(
@@ -350,13 +340,7 @@ async def connections_create_invitation(request: web.BaseRequest):
     connection_mgr = ConnectionManager(context)
     try:
         (connection, invitation) = await connection_mgr.create_invitation(
-            auto_accept=auto_accept,
-            public=public,
-            multi_use=multi_use,
-            alias=alias,
-            recipient_keys=recipient_keys,
-            my_endpoint=service_endpoint,
-            routing_keys=routing_keys,
+            auto_accept=auto_accept, public=public, multi_use=multi_use, alias=alias
         )
 
         result = {
@@ -379,7 +363,7 @@ async def connections_create_invitation(request: web.BaseRequest):
 )
 @querystring_schema(ReceiveInvitationQueryStringSchema())
 @request_schema(ReceiveInvitationRequestSchema())
-@response_schema(ConnRecordSchema(), 200)
+@response_schema(ConnectionRecordSchema(), 200)
 async def connections_receive_invitation(request: web.BaseRequest):
     """
     Request handler for receiving a new connection invitation.
@@ -391,6 +375,12 @@ async def connections_receive_invitation(request: web.BaseRequest):
         The resulting connection record details
 
     """
+
+    # ************Edited Beginning***********
+    # This code is for signing did as pairwise did
+    signing_did = None
+    # ************Edited End******************
+
     context = request.app["request_context"]
     if context.settings.get("admin.no_receive_invites"):
         raise web.HTTPForbidden(
@@ -399,12 +389,18 @@ async def connections_receive_invitation(request: web.BaseRequest):
     connection_mgr = ConnectionManager(context)
     invitation_json = await request.json()
 
+    # ************Edited Beginning***********
+    # This code is for signing did as pairwise did
+    if 'signing_did' in invitation_json:
+        signing_did = invitation_json['signing_did']
+    # ************Edited End******************
+
     try:
         invitation = ConnectionInvitation.deserialize(invitation_json)
         auto_accept = json.loads(request.query.get("auto_accept", "null"))
         alias = request.query.get("alias")
         connection = await connection_mgr.receive_invitation(
-            invitation, auto_accept=auto_accept, alias=alias
+            invitation, signing_did=signing_did, auto_accept=auto_accept, alias=alias
         )
         result = connection.serialize()
     except (ConnectionManagerError, StorageError, BaseModelError) as err:
@@ -419,7 +415,7 @@ async def connections_receive_invitation(request: web.BaseRequest):
 )
 @match_info_schema(ConnIdMatchInfoSchema())
 @querystring_schema(AcceptInvitationQueryStringSchema())
-@response_schema(ConnRecordSchema(), 200)
+@response_schema(ConnectionRecordSchema(), 200)
 async def connections_accept_invitation(request: web.BaseRequest):
     """
     Request handler for accepting a stored connection invitation.
@@ -436,7 +432,7 @@ async def connections_accept_invitation(request: web.BaseRequest):
     connection_id = request.match_info["conn_id"]
 
     try:
-        connection = await ConnRecord.retrieve_by_id(context, connection_id)
+        connection = await ConnectionRecord.retrieve_by_id(context, connection_id)
         connection_mgr = ConnectionManager(context)
         my_label = request.query.get("my_label") or None
         my_endpoint = request.query.get("my_endpoint") or None
@@ -457,7 +453,7 @@ async def connections_accept_invitation(request: web.BaseRequest):
 )
 @match_info_schema(ConnIdMatchInfoSchema())
 @querystring_schema(AcceptRequestQueryStringSchema())
-@response_schema(ConnRecordSchema(), 200)
+@response_schema(ConnectionRecordSchema(), 200)
 async def connections_accept_request(request: web.BaseRequest):
     """
     Request handler for accepting a stored connection request.
@@ -474,7 +470,7 @@ async def connections_accept_request(request: web.BaseRequest):
     connection_id = request.match_info["conn_id"]
 
     try:
-        connection = await ConnRecord.retrieve_by_id(context, connection_id)
+        connection = await ConnectionRecord.retrieve_by_id(context, connection_id)
         connection_mgr = ConnectionManager(context)
         my_endpoint = request.query.get("my_endpoint") or None
         response = await connection_mgr.create_response(connection, my_endpoint)
@@ -505,7 +501,7 @@ async def connections_establish_inbound(request: web.BaseRequest):
     inbound_connection_id = request.match_info["ref_id"]
 
     try:
-        connection = await ConnRecord.retrieve_by_id(context, connection_id)
+        connection = await ConnectionRecord.retrieve_by_id(context, connection_id)
         connection_mgr = ConnectionManager(context)
         await connection_mgr.establish_inbound(
             connection, inbound_connection_id, outbound_handler
@@ -531,7 +527,7 @@ async def connections_remove(request: web.BaseRequest):
     connection_id = request.match_info["conn_id"]
 
     try:
-        connection = await ConnRecord.retrieve_by_id(context, connection_id)
+        connection = await ConnectionRecord.retrieve_by_id(context, connection_id)
         await connection.delete_record(context)
     except StorageNotFoundError as err:
         raise web.HTTPNotFound(reason=err.roll_up) from err
@@ -571,6 +567,7 @@ async def connections_create_static(request: web.BaseRequest):
             their_did=body.get("their_did") or None,
             their_verkey=body.get("their_verkey") or None,
             their_endpoint=body.get("their_endpoint") or None,
+            their_role=body.get("their_role") or None,
             their_label=body.get("their_label") or None,
             alias=body.get("alias") or None,
         )
@@ -588,6 +585,146 @@ async def connections_create_static(request: web.BaseRequest):
     return web.json_response(response)
 
 
+async def put_verification_to_ledger(request: web.BaseRequest):
+
+    req_body = await request.json()
+    signing_did = req_body['signing_did']
+    signing_vk = req_body['signing_vk']
+    print("did: ", signing_did)
+    print("vk:  ", signing_vk)
+
+    context = request.app['request_context']
+    ledger: BaseLedger = await context.inject(BaseLedger, required=False)
+    async with ledger:
+        await ledger.register_nym(signing_did, signing_vk)
+
+    print("Put signing verkey to ledger")
+    return web.json_response({"status": "true"})
+
+
+async def create_signing_did(request: web.BaseRequest):
+    context = request.app['request_context']
+    wallet: BaseWallet = await context.inject(BaseWallet, required=False)
+    (signing_did, signing_vk) = await indy.did.create_and_store_my_did(
+        wallet.handle,
+        "{}",
+    )
+
+    print("Created app signing DID & verkey.")
+    print(f"signing DID: {signing_did}")
+    print(f"signing verkey: {signing_vk}")
+    return web.json_response({
+        'signing_did': signing_did,
+        'signing_vk': signing_vk,
+    })
+
+
+async def store_public_did(request: web.BaseRequest):
+    """
+    Takes a DID that has been registered with the ledger, stores
+    it in the agent's wallet, and sets it as the public DID.
+
+    Args:
+        request: aiohttp request object
+
+    Returns:
+        status
+
+    """
+
+    # unpack request body
+    req_body = await request.json()
+    did = req_body["did"]
+    seed = req_body["seed"]
+
+    # retrieve wallet and store DID & set it as the public DID
+    context = request.app['request_context']
+    wallet: BaseWallet = await context.inject(BaseWallet, required=False)
+    await wallet.create_public_did(seed=seed, did=did)
+
+    print("Stored agent public DID in wallet")
+    return web.json_response({'status': 'success'})
+
+
+async def sign_transaction(request: web.BaseRequest):
+
+    context = request.app['request_context']
+    wallet: BaseWallet = await context.inject(BaseWallet, required=False)
+
+    # # Retrieves non-public signing DID
+    # # TODO: Need a way to specifically identify the signing DID in case
+    # # there are more than one DIDs stored in client wallet
+    # did_list = await wallet.get_local_dids()
+    # signing_did = None
+    # for did in did_list:
+    #     if not getattr(did, 'metadata').get('public'):
+    #         signing_did = getattr(did, 'did')
+
+    # if not signing_did:
+    #     raise web.HTTPBadRequest(
+    #         reason="Signing DID not found. Have you registered for a DID?"
+    #     )
+
+    req_body = await request.json()
+    signing_did = req_body["signing_did"]
+    message = bytes(req_body["message"], 'utf-8')
+
+    # Get verkey associated with signing DID
+    did_meta = await indy.did.get_my_did_with_meta(
+        wallet.handle,
+        signing_did
+    )
+    signing_vk = json.loads(did_meta)["verkey"]
+
+    signature = await indy.crypto.crypto_sign(
+        wallet.handle,
+        signing_vk,
+        message
+    )
+
+    signature = signature.decode('iso-8859-15')
+    signature = signature.encode('utf-8')
+    signature = base64.b64encode(signature)
+    signature = signature.decode('iso-8859-15')
+
+    print("Client signed transaction")
+    return web.json_response({'signature': signature})
+
+
+async def verify_signed_transaction(request: web.BaseRequest):
+
+    context = request.app['request_context']
+    wallet: BaseWallet = await context.inject(BaseWallet, required=False)
+
+    req_body = await request.json()
+
+    signing_did = req_body["signing_did"]
+    message = bytes(req_body['message'], 'utf-8')
+    signature = req_body["signature"]
+
+    ledger: BaseLedger = await context.inject(BaseLedger, required=False)
+    async with ledger:
+        try:
+            signing_vk = await ledger.get_key_for_did(signing_did)
+            if not signing_vk:
+                raise web.HTTPNotFound(
+                    reason=f"DID {signing_did} is not on the ledger"
+                )
+        except LedgerError as err:
+            raise web.HTTPBadRequest(reason=err.roll_up) from err
+
+    # encode signature
+    signature = signature.encode('iso-8859-15')
+    signature = base64.b64decode(signature)
+    signature = signature.decode('utf-8')
+    signature = signature.encode('iso-8859-15')
+
+    verified = await wallet.verify_message(message, signature, signing_vk)
+
+    print("Admin verified transaction")
+    return web.json_response({'status': str(verified)})
+
+
 async def register(app: web.Application):
     """Register routes."""
 
@@ -596,6 +733,11 @@ async def register(app: web.Application):
             web.get("/connections", connections_list, allow_head=False),
             web.get("/connections/{conn_id}", connections_retrieve, allow_head=False),
             web.post("/connections/create-static", connections_create_static),
+            web.post("/connections/create-signing-did", create_signing_did),
+            web.post("/connections/store-public-did", store_public_did),
+            web.post("/connections/put-key-ledger", put_verification_to_ledger),
+            web.post("/connections/sign-transaction", sign_transaction),
+            web.post("/connections/verify-transaction", verify_signed_transaction),
             web.post("/connections/create-invitation", connections_create_invitation),
             web.post("/connections/receive-invitation", connections_receive_invitation),
             web.post(
@@ -609,6 +751,7 @@ async def register(app: web.Application):
                 "/connections/{conn_id}/establish-inbound/{ref_id}",
                 connections_establish_inbound,
             ),
+
             web.delete("/connections/{conn_id}", connections_remove),
         ]
     )

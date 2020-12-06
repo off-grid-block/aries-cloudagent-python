@@ -6,7 +6,7 @@ from asynctest import TestCase as AsyncTestCase, mock as async_mock
 from marshmallow import EXCLUDE
 
 from ...config.injection_context import InjectionContext
-from ...connections.models.conn_record import ConnRecord
+from ...connections.models.connection_record import ConnectionRecord
 from ...core.protocol_registry import ProtocolRegistry
 from ...messaging.agent_message import AgentMessage, AgentMessageSchema
 from ...messaging.responder import MockResponder

@@ -21,23 +21,6 @@ from .utils import flatten, log_json, log_msg, log_timer, output_reader
 
 LOGGER = logging.getLogger(__name__)
 
-event_stream_handler = logging.StreamHandler()
-event_stream_handler.setFormatter(logging.Formatter("\nEVENT: %(message)s"))
-
-DEBUG_EVENTS = os.getenv("EVENTS")
-EVENT_LOGGER = logging.getLogger("event")
-EVENT_LOGGER.setLevel(logging.DEBUG if DEBUG_EVENTS else logging.NOTSET)
-EVENT_LOGGER.addHandler(event_stream_handler)
-EVENT_LOGGER.propagate = False
-
-TRACE_TARGET = os.getenv("TRACE_TARGET")
-TRACE_TAG = os.getenv("TRACE_TAG")
-TRACE_ENABLED = os.getenv("TRACE_ENABLED")
-
-WEBHOOK_TARGET = os.getenv("WEBHOOK_TARGET")
-
-AGENT_ENDPOINT = os.getenv("AGENT_ENDPOINT")
-
 DEFAULT_POSTGRES = bool(os.getenv("POSTGRES"))
 DEFAULT_INTERNAL_HOST = "127.0.0.1"
 DEFAULT_EXTERNAL_HOST = "localhost"
@@ -50,8 +33,6 @@ RUN_MODE = os.getenv("RUNMODE")
 
 GENESIS_URL = os.getenv("GENESIS_URL")
 LEDGER_URL = os.getenv("LEDGER_URL")
-GENESIS_FILE = os.getenv("GENESIS_FILE")
-
 if RUN_MODE == "docker":
     DEFAULT_INTERNAL_HOST = os.getenv("DOCKERHOST") or "host.docker.internal"
     DEFAULT_EXTERNAL_HOST = DEFAULT_INTERNAL_HOST
@@ -62,16 +43,6 @@ elif RUN_MODE == "pwd":
     DEFAULT_EXTERNAL_HOST = os.getenv("DOCKERHOST") or "host.docker.internal"
     DEFAULT_BIN_PATH = "./bin"
     DEFAULT_PYTHON_PATH = "."
-
-
-class repr_json:
-    def __init__(self, val):
-        self.val = val
-
-    def __repr__(self) -> str:
-        if isinstance(self.val, str):
-            return self.val
-        return json.dumps(self.val, indent=4)
 
 
 async def default_genesis_txns():
@@ -87,9 +58,6 @@ async def default_genesis_txns():
                     f"http://{DEFAULT_EXTERNAL_HOST}:9000/genesis"
                 ) as resp:
                     genesis = await resp.text()
-        elif GENESIS_FILE:
-            with open(GENESIS_FILE, "r") as genesis_file:
-                genesis = genesis_file.read()
         else:
             with open("local-genesis.txt", "r") as genesis_file:
                 genesis = genesis_file.read()
@@ -111,11 +79,9 @@ class DemoAgent:
         label: str = None,
         color: str = None,
         prefix: str = None,
-        tails_server_base_url: str = None,
         timing: bool = False,
         timing_log: str = None,
         postgres: bool = None,
-        revocation: bool = False,
         extra_args=None,
         **params,
     ):
@@ -131,23 +97,14 @@ class DemoAgent:
         self.timing = timing
         self.timing_log = timing_log
         self.postgres = DEFAULT_POSTGRES if postgres is None else postgres
-        self.tails_server_base_url = tails_server_base_url
         self.extra_args = extra_args
-        self.trace_enabled = TRACE_ENABLED
-        self.trace_target = TRACE_TARGET
-        self.trace_tag = TRACE_TAG
-        self.external_webhook_target = WEBHOOK_TARGET
-
-        self.admin_url = f"http://{self.internal_host}:{admin_port}"
-        if AGENT_ENDPOINT:
-            self.endpoint = AGENT_ENDPOINT
-        elif RUN_MODE == "pwd":
+        if RUN_MODE == "pwd":
             self.endpoint = f"http://{self.external_host}".replace(
                 "{PORT}", str(http_port)
             )
         else:
             self.endpoint = f"http://{self.external_host}:{http_port}"
-
+        self.admin_url = f"http://{self.internal_host}:{admin_port}"
         self.webhook_port = None
         self.webhook_url = None
         self.webhook_site = None
@@ -170,14 +127,7 @@ class DemoAgent:
         self.did = None
         self.wallet_stats = []
 
-    async def register_schema_and_creddef(
-        self,
-        schema_name,
-        version,
-        schema_attrs,
-        support_revocation: bool = False,
-        revocation_registry_size: int = None,
-    ):
+    async def register_schema_and_creddef(self, schema_name, version, schema_attrs):
         # Create a schema
         schema_body = {
             "schema_name": schema_name,
@@ -190,15 +140,7 @@ class DemoAgent:
         log_msg("Schema ID:", schema_id)
 
         # Create a cred def for the schema
-        credential_definition_body = {
-            "schema_id": schema_id,
-            "support_revocation": support_revocation,
-            **{
-                "revocation_registry_size": revocation_registry_size
-                for _ in [""]
-                if support_revocation
-            },
-        }
+        credential_definition_body = {"schema_id": schema_id}
         credential_definition_response = await self.admin_POST(
             "/credential-definitions", credential_definition_body
         )
@@ -206,7 +148,8 @@ class DemoAgent:
             "credential_definition_id"
         ]
         log_msg("Cred def ID:", credential_definition_id)
-        return schema_id, credential_definition_id
+
+        return (schema_id, credential_definition_id)
 
     def get_agent_args(self):
         result = [
@@ -221,7 +164,6 @@ class DemoAgent:
             ("--wallet-type", self.wallet_type),
             ("--wallet-name", self.wallet_name),
             ("--wallet-key", self.wallet_key),
-            "--preserve-exchange-records",
         ]
         if self.genesis_data:
             result.append(("--genesis-transactions", self.genesis_data))
@@ -243,35 +185,6 @@ class DemoAgent:
             )
         if self.webhook_url:
             result.append(("--webhook-url", self.webhook_url))
-        if self.external_webhook_target:
-            result.append(("--webhook-url", self.external_webhook_target))
-        if self.trace_enabled:
-            result.extend(
-                [
-                    ("--trace",),
-                    ("--trace-target", self.trace_target),
-                    ("--trace-tag", self.trace_tag),
-                    ("--trace-label", self.label + ".trace"),
-                ]
-            )
-
-        if self.tails_server_base_url:
-            result.append(("--tails-server-base-url", self.tails_server_base_url))
-        else:
-            # set the tracing parameters but don't enable tracing
-            result.extend(
-                [
-                    (
-                        "--trace-target",
-                        self.trace_target if self.trace_target else "log",
-                    ),
-                    (
-                        "--trace-tag",
-                        self.trace_tag if self.trace_tag else "acapy.events",
-                    ),
-                    ("--trace-label", self.label + ".trace"),
-                ]
-            )
         if self.extra_args:
             result.extend(self.extra_args)
 
@@ -404,35 +317,20 @@ class DemoAgent:
         topic = request.match_info["topic"]
         payload = await request.json()
         await self.handle_webhook(topic, payload)
-        return web.Response(status=200)
+        return web.Response(text="")
 
     async def handle_webhook(self, topic: str, payload):
         if topic != "webhook":  # would recurse
             handler = f"handle_{topic}"
             method = getattr(self, handler, None)
             if method:
-                EVENT_LOGGER.debug(
-                    "Agent called controller webhook: %s%s",
-                    handler,
-                    (f" with payload: \n{repr_json(payload)}" if payload else ""),
-                )
-                asyncio.get_event_loop().create_task(method(payload))
+                await method(payload)
             else:
                 log_msg(
                     f"Error: agent {self.ident} "
                     f"has no method {handler} "
                     f"to handle webhook on topic {topic}"
                 )
-
-    async def handle_problem_report(self, message):
-        self.log(
-            f"Received problem report: {message['explain-ltxt']}\n", source="stderr"
-        )
-
-    async def handle_revocation_registry(self, message):
-        self.log(
-            f"Revocation registry: {message['revoc_reg_id']} state: {message['state']}"
-        )
 
     async def admin_request(
         self, method, path, data=None, text=False, params=None
@@ -441,12 +339,8 @@ class DemoAgent:
         async with self.client_session.request(
             method, self.admin_url + path, json=data, params=params
         ) as resp:
+            resp.raise_for_status()
             resp_text = await resp.text()
-            try:
-                resp.raise_for_status()
-            except Exception as e:
-                # try to retrieve and print text on error
-                raise Exception(f"Error: {resp_text}") from e
             if not resp_text and not text:
                 return None
             if not text:
@@ -458,14 +352,7 @@ class DemoAgent:
 
     async def admin_GET(self, path, text=False, params=None) -> ClientResponse:
         try:
-            EVENT_LOGGER.debug("Controller GET %s request to Agent", path)
-            response = await self.admin_request("GET", path, None, text, params)
-            EVENT_LOGGER.debug(
-                "Response from GET %s received: \n%s",
-                path,
-                repr_json(response),
-            )
-            return response
+            return await self.admin_request("GET", path, None, text, params)
         except ClientError as e:
             self.log(f"Error during GET {path}: {str(e)}")
             raise
@@ -474,53 +361,9 @@ class DemoAgent:
         self, path, data=None, text=False, params=None
     ) -> ClientResponse:
         try:
-            EVENT_LOGGER.debug(
-                "Controller POST %s request to Agent%s",
-                path,
-                (" with data: \n{}".format(repr_json(data)) if data else ""),
-            )
-            response = await self.admin_request("POST", path, data, text, params)
-            EVENT_LOGGER.debug(
-                "Response from POST %s received: \n%s",
-                path,
-                repr_json(response),
-            )
-            return response
+            return await self.admin_request("POST", path, data, text, params)
         except ClientError as e:
             self.log(f"Error during POST {path}: {str(e)}")
-            raise
-
-    async def admin_PATCH(
-        self, path, data=None, text=False, params=None
-    ) -> ClientResponse:
-        try:
-            return await self.admin_request("PATCH", path, data, text, params)
-        except ClientError as e:
-            self.log(f"Error during PATCH {path}: {str(e)}")
-            raise
-
-    async def admin_GET_FILE(self, path, params=None) -> bytes:
-        try:
-            params = {k: v for (k, v) in (params or {}).items() if v is not None}
-            resp = await self.client_session.request(
-                "GET", self.admin_url + path, params=params
-            )
-            resp.raise_for_status()
-            return await resp.read()
-        except ClientError as e:
-            self.log(f"Error during GET FILE {path}: {str(e)}")
-            raise
-
-    async def admin_PUT_FILE(self, files, url, params=None, headers=None) -> bytes:
-        try:
-            params = {k: v for (k, v) in (params or {}).items() if v is not None}
-            resp = await self.client_session.request(
-                "PUT", url, params=params, data=files, headers=headers
-            )
-            resp.raise_for_status()
-            return await resp.read()
-        except ClientError as e:
-            self.log(f"Error during PUT FILE {url}: {str(e)}")
             raise
 
     async def detect_process(self):
@@ -665,3 +508,5 @@ class DemoAgent:
 
     def reset_postgres_stats(self):
         self.wallet_stats.clear()
+
+

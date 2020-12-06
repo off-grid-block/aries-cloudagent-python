@@ -2,7 +2,7 @@ from asynctest import TestCase as AsyncTestCase
 from asynctest import mock as async_mock
 
 from aries_cloudagent.config.injection_context import InjectionContext
-from aries_cloudagent.connections.models.conn_record import ConnRecord
+from aries_cloudagent.connections.models.connection_record import ConnectionRecord
 from aries_cloudagent.messaging.request_context import RequestContext
 from aries_cloudagent.messaging.responder import MockResponder
 from aries_cloudagent.storage.base import BaseStorage
@@ -41,14 +41,14 @@ class TestIntroductionRoutes(AsyncTestCase):
                 outbound_handler=None,
             )
 
-    async def test_service_start_introduction_init_conn_rec_not_completed(self):
+    async def test_service_start_introduction_init_conn_rec_not_active(self):
         service = await demo_service.DemoIntroductionService.service_handler()(
             self.context
         )
 
-        conn_rec_init = ConnRecord(
+        conn_rec_init = ConnectionRecord(
             connection_id=None,
-            state=ConnRecord.State.ABANDONED.rfc23,
+            state=ConnectionRecord.STATE_INACTIVE,
         )
         await conn_rec_init.save(self.context)
         assert conn_rec_init._id
@@ -66,9 +66,9 @@ class TestIntroductionRoutes(AsyncTestCase):
             self.context
         )
 
-        conn_rec_init = ConnRecord(
+        conn_rec_init = ConnectionRecord(
             connection_id=None,
-            state=ConnRecord.State.COMPLETED.rfc23,
+            state=ConnectionRecord.STATE_ACTIVE,
         )
         await conn_rec_init.save(self.context)
         assert conn_rec_init._id
@@ -81,21 +81,21 @@ class TestIntroductionRoutes(AsyncTestCase):
                 outbound_handler=None,
             )
 
-    async def test_service_start_introduction_target_conn_rec_not_completed(self):
+    async def test_service_start_introduction_target_conn_rec_not_active(self):
         service = await demo_service.DemoIntroductionService.service_handler()(
             self.context
         )
 
-        conn_rec_init = ConnRecord(
+        conn_rec_init = ConnectionRecord(
             connection_id=None,
-            state=ConnRecord.State.COMPLETED.rfc23,
+            state=ConnectionRecord.STATE_ACTIVE,
         )
         await conn_rec_init.save(self.context)
         assert conn_rec_init._id
 
-        conn_rec_target = ConnRecord(
+        conn_rec_target = ConnectionRecord(
             connection_id=None,
-            state=ConnRecord.State.ABANDONED.rfc23,
+            state=ConnectionRecord.STATE_INACTIVE,
         )
         await conn_rec_target.save(self.context)
         assert conn_rec_target._id
@@ -114,16 +114,16 @@ class TestIntroductionRoutes(AsyncTestCase):
         )
         start_responder = MockResponder()
 
-        conn_rec_init = ConnRecord(
+        conn_rec_init = ConnectionRecord(
             connection_id=None,
-            state=ConnRecord.State.COMPLETED.rfc23,
+            state=ConnectionRecord.STATE_ACTIVE,
         )
         await conn_rec_init.save(self.context)
         assert conn_rec_init._id
 
-        conn_rec_target = ConnRecord(
+        conn_rec_target = ConnectionRecord(
             connection_id=None,
-            state=ConnRecord.State.COMPLETED.rfc23,
+            state=ConnectionRecord.STATE_ACTIVE,
         )
         await conn_rec_target.save(self.context)
         assert conn_rec_target._id
@@ -184,9 +184,9 @@ class TestIntroductionRoutes(AsyncTestCase):
             self.context
         )
 
-        conn_rec_target = ConnRecord(
+        conn_rec_target = ConnectionRecord(
             connection_id=None,
-            state=ConnRecord.State.COMPLETED.rfc23,
+            state=ConnectionRecord.STATE_ACTIVE,
         )
         await conn_rec_target.save(self.context)
         assert conn_rec_target._id

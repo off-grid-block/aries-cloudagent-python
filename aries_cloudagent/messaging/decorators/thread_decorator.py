@@ -131,19 +131,17 @@ class ThreadDecoratorSchema(BaseModelSchema):
         description="Parent thread identifier",
         example=UUIDFour.EXAMPLE,  # typically a UUID4 but not necessarily
     )
-    sender_order = fields.Int(
+    sender_order = fields.Integer(
         required=False,
         allow_none=True,
         description="Ordinal of message among all from current sender in thread",
         example=11,
-        strict=True,
     )
     received_orders = fields.Dict(
         keys=fields.Str(description="Sender key"),
-        values=fields.Int(
+        values=fields.Integer(
             description="Highest sender_order value for sender",
-            example=3,
-            strict=True,
+            example="3",
         ),
         required=False,
         allow_none=True,

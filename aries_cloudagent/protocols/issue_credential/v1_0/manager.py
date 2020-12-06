@@ -16,8 +16,9 @@ from .models.credential_exchange import V10CredentialExchange
 from ....cache.base import BaseCache
 from ....config.injection_context import InjectionContext
 from ....core.error import BaseError
-from ....indy.holder import IndyHolder, IndyHolderError
-from ....indy.issuer import IndyIssuer, IndyIssuerRevocationRegistryFullError
+from ....holder.base import BaseHolder, HolderError
+from ....issuer.base import BaseIssuer
+from ....issuer.indy import IssuerRevocationRegistryFullError
 from ....ledger.base import BaseLedger
 from ....messaging.credential_definitions.util import (
     CRED_DEF_TAGS,
@@ -93,12 +94,12 @@ class CredentialManager:
         if auto_remove is None:
             auto_remove = not self.context.settings.get("preserve_exchange_records")
         credential_exchange = V10CredentialExchange(
+            auto_issue=True,
+            auto_remove=auto_remove,
             connection_id=connection_id,
             initiator=V10CredentialExchange.INITIATOR_SELF,
             role=V10CredentialExchange.ROLE_ISSUER,
             credential_proposal_dict=credential_proposal.serialize(),
-            auto_issue=True,
-            auto_remove=auto_remove,
             trace=(credential_proposal._trace is not None),
         )
         (credential_exchange, credential_offer) = await self.create_offer(
@@ -198,7 +199,6 @@ class CredentialManager:
             auto_issue=self.context.settings.get(
                 "debug.auto_respond_credential_request"
             ),
-            auto_remove=not self.context.settings.get("preserve_exchange_records"),
             trace=(credential_proposal_message._trace is not None),
         )
         await cred_ex_record.save(self.context, reason="receive credential proposal")
@@ -221,7 +221,7 @@ class CredentialManager:
         """
 
         async def _create(cred_def_id):
-            issuer: IndyIssuer = await self.context.inject(IndyIssuer)
+            issuer: BaseIssuer = await self.context.inject(BaseIssuer)
             offer_json = await issuer.create_credential_offer(cred_def_id)
             return json.loads(offer_json)
 
@@ -328,7 +328,6 @@ class CredentialManager:
                 initiator=V10CredentialExchange.INITIATOR_EXTERNAL,
                 role=V10CredentialExchange.ROLE_HOLDER,
                 credential_proposal_dict=credential_proposal_dict,
-                auto_remove=not self.context.settings.get("preserve_exchange_records"),
                 trace=(credential_offer_message._trace is not None),
             )
 
@@ -373,7 +372,7 @@ class CredentialManager:
                     credential_definition_id
                 )
 
-            holder: IndyHolder = await self.context.inject(IndyHolder)
+            holder: BaseHolder = await self.context.inject(BaseHolder)
             request_json, metadata_json = await holder.create_credential_request(
                 credential_offer, credential_definition, holder_did
             )
@@ -565,7 +564,7 @@ class CredentialManager:
             credential_values = CredentialProposal.deserialize(
                 cred_ex_record.credential_proposal_dict
             ).credential_proposal.attr_dict(decode=False)
-            issuer: IndyIssuer = await self.context.inject(IndyIssuer)
+            issuer: BaseIssuer = await self.context.inject(BaseIssuer)
             try:
                 (
                     credential_json,
@@ -599,7 +598,7 @@ class CredentialManager:
                         )
                     )
 
-            except IndyIssuerRevocationRegistryFullError:
+            except IssuerRevocationRegistryFullError:
                 # unlucky: duelling instance issued last cred near same time as us
                 await active_rev_reg_rec.set_state(
                     self.context,
@@ -704,7 +703,7 @@ class CredentialManager:
                     raw_credential["rev_reg_id"]
                 )
 
-        holder: IndyHolder = await self.context.inject(IndyHolder)
+        holder: BaseHolder = await self.context.inject(BaseHolder)
         if (
             cred_ex_record.credential_proposal_dict
             and "credential_proposal" in cred_ex_record.credential_proposal_dict
@@ -727,7 +726,7 @@ class CredentialManager:
                 credential_id=credential_id,
                 rev_reg_def=revoc_reg_def,
             )
-        except IndyHolderError as e:
+        except HolderError as e:
             LOGGER.error(f"Error storing credential. {e.error_code}: {e.message}")
             raise e
 
@@ -751,7 +750,8 @@ class CredentialManager:
         )
 
         if cred_ex_record.auto_remove:
-            await cred_ex_record.delete_record(self.context)  # all done: delete
+            # Delete the exchange record since we're done with it
+            await cred_ex_record.delete_record(self.context)
 
         return (cred_ex_record, credential_ack_message)
 
@@ -776,6 +776,7 @@ class CredentialManager:
         await cred_ex_record.save(self.context, reason="credential acked")
 
         if cred_ex_record.auto_remove:
-            await cred_ex_record.delete_record(self.context)  # all done: delete
+            # We're done with the exchange so delete
+            await cred_ex_record.delete_record(self.context)
 
         return cred_ex_record

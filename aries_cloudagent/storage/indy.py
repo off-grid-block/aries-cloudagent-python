@@ -1,19 +1,12 @@
 """Indy implementation of BaseStorage interface."""
 
-import asyncio
 import json
-import logging
 from typing import Mapping, Sequence
 
 from indy import non_secrets
 from indy.error import IndyError, ErrorCode
 
-from .base import (
-    DEFAULT_PAGE_SIZE,
-    BaseStorage,
-    BaseStorageRecordSearch,
-    validate_record,
-)
+from .base import BaseStorage, BaseStorageRecordSearch
 from .error import (
     StorageError,
     StorageDuplicateError,
@@ -23,7 +16,16 @@ from .error import (
 from .record import StorageRecord
 from ..wallet.indy import IndyWallet
 
-LOGGER = logging.getLogger(__name__)
+
+def _validate_record(record: StorageRecord):
+    if not record:
+        raise StorageError("No record provided")
+    if not record.id:
+        raise StorageError("Record has no ID")
+    if not record.type:
+        raise StorageError("Record has no type")
+    if not record.value:
+        raise StorageError("Record must have a non-empty value")
 
 
 class IndyStorage(BaseStorage):
@@ -52,7 +54,7 @@ class IndyStorage(BaseStorage):
             record: `StorageRecord` to be stored
 
         """
-        validate_record(record)
+        _validate_record(record)
         tags_json = json.dumps(record.tags) if record.tags else None
         try:
             await non_secrets.add_wallet_record(
@@ -117,26 +119,45 @@ class IndyStorage(BaseStorage):
             tags=result["tags"] or {},
         )
 
-    async def update_record(self, record: StorageRecord, value: str, tags: Mapping):
+    async def update_record_value(self, record: StorageRecord, value: str):
         """
-        Update an existing stored record's value and tags.
+        Update an existing stored record's value.
 
         Args:
             record: `StorageRecord` to update
             value: The new value
-            tags: The new tags
 
         Raises:
             StorageNotFoundError: If record not found
             StorageError: If a libindy error occurs
 
         """
-        validate_record(record)
-        tags_json = json.dumps(tags) if tags else "{}"
+        _validate_record(record)
         try:
             await non_secrets.update_wallet_record_value(
                 self._wallet.handle, record.type, record.id, value
             )
+        except IndyError as x_indy:
+            if x_indy.error_code == ErrorCode.WalletItemNotFound:
+                raise StorageNotFoundError(f"Record not found: {record.id}")
+            raise StorageError(str(x_indy))
+
+    async def update_record_tags(self, record: StorageRecord, tags: Mapping):
+        """
+        Update an existing stored record's tags.
+
+        Args:
+            record: `StorageRecord` to update
+            tags: New tags
+
+        Raises:
+            StorageNotFoundError: If record not found
+            StorageError: If a libindy error occurs
+
+        """
+        _validate_record(record)
+        tags_json = json.dumps(tags) if tags else "{}"
+        try:
             await non_secrets.update_wallet_record_tags(
                 self._wallet.handle, record.type, record.id, tags_json
             )
@@ -144,6 +165,27 @@ class IndyStorage(BaseStorage):
             if x_indy.error_code == ErrorCode.WalletItemNotFound:
                 raise StorageNotFoundError(f"Record not found: {record.id}")
             raise StorageError(str(x_indy))
+
+    async def delete_record_tags(
+        self, record: StorageRecord, tags: (Sequence, Mapping)
+    ):
+        """
+        Update an existing stored record's tags.
+
+        Args:
+            record: `StorageRecord` to delete
+            tags: Tags
+
+        """
+        _validate_record(record)
+        if tags:
+            # check existence of record first (otherwise no exception thrown)
+            await self.get_record(record.type, record.id)
+
+            tag_names_json = json.dumps(list(tags))
+            await non_secrets.delete_wallet_record_tags(
+                self._wallet.handle, record.type, record.id, tag_names_json
+            )
 
     async def delete_record(self, record: StorageRecord):
         """
@@ -157,7 +199,7 @@ class IndyStorage(BaseStorage):
             StorageError: If a libindy error occurs
 
         """
-        validate_record(record, delete=True)
+        _validate_record(record)
         try:
             await non_secrets.delete_wallet_record(
                 self._wallet.handle, record.type, record.id
@@ -211,36 +253,51 @@ class IndyStorageRecordSearch(BaseStorageRecordSearch):
             page_size: Size of page to return
 
         """
+        super().__init__(store, type_filter, tag_query, page_size, options)
         self._handle = None
-        self._done = False
-        self.store = store
-        self.options = options or {}
-        self.page_size = page_size or DEFAULT_PAGE_SIZE
-        self.tag_query = tag_query
-        self.type_filter = type_filter
 
-    async def fetch(self, max_count: int = None) -> Sequence[StorageRecord]:
+    @property
+    def opened(self) -> bool:
+        """
+        Accessor for open state.
+
+        Returns:
+            True if opened, else False
+
+        """
+        return self._handle is not None
+
+    @property
+    def handle(self):
+        """
+        Accessor for search handle.
+
+        Returns:
+            The handle
+
+        """
+        return self._handle
+
+    async def fetch(self, max_count: int) -> Sequence[StorageRecord]:
         """
         Fetch the next list of results from the store.
 
         Args:
-            max_count: Max number of records to return. If not provided,
-              defaults to the backend's preferred page size
+            max_count: Max number of records to return
 
         Returns:
-            A list of `StorageRecord` instances
+            A list of `StorageRecord`
 
         Raises:
             StorageSearchError: If the search query has not been opened
 
         """
-        if self._done:
-            raise StorageSearchError("Search query is complete")
-        await self._open()
+        if not self.opened:
+            raise StorageSearchError("Search query has not been opened")
 
         try:
             result_json = await non_secrets.fetch_wallet_search_next_records(
-                self.store.wallet.handle, self._handle, max_count or self.page_size
+                self.store.wallet.handle, self._handle, max_count
             )
         except IndyError as x_indy:
             raise StorageSearchError(str(x_indy)) from x_indy
@@ -251,23 +308,16 @@ class IndyStorageRecordSearch(BaseStorageRecordSearch):
             for row in results["records"]:
                 ret.append(
                     StorageRecord(
-                        type=self.type_filter,
+                        type=self._type_filter,
                         id=row["id"],
                         value=row["value"],
                         tags=row["tags"],
                     )
                 )
-
-        if not ret:
-            await self.close()
-
         return ret
 
-    async def _open(self):
+    async def open(self):
         """Start the search query."""
-        if self._handle:
-            return
-
         query_json = json.dumps(self.tag_query or {})
         options_json = json.dumps(
             {
@@ -275,7 +325,7 @@ class IndyStorageRecordSearch(BaseStorageRecordSearch):
                 "retrieveTotalCount": False,
                 "retrieveType": False,
                 "retrieveValue": True,
-                "retrieveTags": self.options.get("retrieveTags", True),
+                "retrieveTags": self.option("retrieveTags", True),
             }
         )
         try:
@@ -291,25 +341,5 @@ class IndyStorageRecordSearch(BaseStorageRecordSearch):
             if self._handle:
                 await non_secrets.close_wallet_search(self._handle)
                 self._handle = None
-                self.store = None
-            self._done = True
         except IndyError as x_indy:
             raise StorageSearchError(str(x_indy)) from x_indy
-
-    def __del__(self):
-        """Ensure the search is closed."""
-        if self._handle:
-
-            async def cleanup(handle):
-                LOGGER.warning("Indy wallet search was not closed manually")
-                try:
-                    await non_secrets.close_wallet_search(handle)
-                except Exception:
-                    LOGGER.exception("Exception when auto-closing Indy wallet search")
-
-            loop = asyncio.get_event_loop()
-            task = loop.create_task(cleanup(self._handle))
-            if not loop.is_running():
-                print("not running")
-                loop.run_until_complete(task)
-            print(task)

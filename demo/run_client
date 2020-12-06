@@ -1,0 +1,81 @@
+#!/bin/bash
+shopt -s nocasematch
+cd $(dirname $0)
+# AGENT="$1"
+# shift
+
+# # ************Edited Beginning************
+# # File edited for Yale research
+# #     by Ashlin, Minto, Athul Antony
+# echo "Enter start port for Agent : "
+# read START
+# echo "Enter end port for Agent : "
+# read END
+# if [ "$AGENT" = "ci" ]; then
+# 	AGENT_MODULE="ci"
+# 	AGENT_PORT=$START
+# 	AGENT_PORT_RANGE=$START-$END
+# elif [ "$AGENT" = "msp" ]; then
+# 	AGENT_MODULE="msp"
+# 	AGENT_PORT=$START
+# 	AGENT_PORT_RANGE=$START-$END
+# elif [ "$AGENT" = "client" ]; then
+# 	AGENT_MODULE="client"
+# 	AGENT_PORT=$START
+# 	AGENT_PORT_RANGE=$START-$END
+# elif [ "$AGENT" = "ci_msp" ]; then
+# 	AGENT_MODULE="ci_msp"
+# 	AGENT_PORT=$START
+# 	AGENT_PORT_RANGE=$START-$END
+# else
+# 	echo "Please specify which agent you want to run. Choose from 'ci', 'client', 'msp'."
+# 	exit 1
+# fi
+# ************Edited End******************
+
+echo "Preparing agent image..."
+docker build -q -t aca-py-demo -f ../docker/Dockerfile.demo .. || exit 1
+
+if [ -z "${PWD_HOST_FQDN}" ]; then
+	DOCKERHOST=`docker run --rm --net=host eclipse/che-ip`
+    export RUNMODE="docker"
+else
+	PWD_HOST="${PWD_HOST_FQDN}"
+    if [ "$PWD_HOST_FQDN" = "labs.play-with-docker.com" ]
+      then
+        export ETH_CONFIG="eth1"
+      elif [ "$PWD_HOST_FQDN" = "play-with-docker.vonx.io" ]
+      then
+        export ETH_CONFIG="eth0"
+      else
+        export ETH_CONFIG="eth0"
+      fi
+    MY_HOST=`ifconfig ${ETH_CONFIG} | grep inet | cut -d':' -f2 | cut -d' ' -f1 | sed 's/\./\-/g'`
+    export DOCKERHOST="ip${MY_HOST}-${SESSION_ID}-{PORT}.direct.${PWD_HOST_FQDN}"
+    export RUNMODE="pwd"
+fi
+
+echo $DOCKERHOST
+
+
+DOCKER_ENV="-e LOG_LEVEL=${LOG_LEVEL} -e RUNMODE=${RUNMODE} -e DOCKERHOST=${DOCKERHOST}"
+if ! [ -z "$POSTGRES" ]; then
+	DOCKER_ENV="${DOCKER_ENV} -e POSTGRES=1 -e RUST_BACKTRACE=1"
+fi
+if ! [ -z "$LEDGER_URL" ]; then
+	GENESIS_URL="${LEDGER_URL}/genesis"
+	DOCKER_ENV="${DOCKER_ENV} -e LEDGER_URL=${LEDGER_URL} -e GENESIS_URL=${GENESIS_URL}"
+fi
+
+# on Windows, docker run needs to be prefixed by winpty
+if [ "$OSTYPE" = "msys" ]; then
+	DOCKER="winpty docker"
+fi
+DOCKER=${DOCKER:-docker}
+
+
+echo "Starting client..."
+$DOCKER run --name client.example.com --rm -it \
+	-p 0.0.0.0:8010-8020:8010-8020 \
+	$DOCKER_ENV \
+	aca-py-demo client --port 8010 --container client.example.com

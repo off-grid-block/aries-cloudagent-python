@@ -7,11 +7,11 @@ import time
 from ....revocation.models.revocation_registry import RevocationRegistry
 from ....config.injection_context import InjectionContext
 from ....core.error import BaseError
-from ....indy.holder import IndyHolder, IndyHolderError
-from ....indy.verifier import IndyVerifier
+from ....holder.base import BaseHolder, HolderError
 from ....ledger.base import BaseLedger
 from ....messaging.decorators.attach_decorator import AttachDecorator
 from ....messaging.responder import BaseResponder
+from ....verifier.base import BaseVerifier
 
 from .models.presentation_exchange import V10PresentationExchange
 from .messages.presentation_ack import PresentationAck
@@ -263,9 +263,8 @@ class PresentationManager:
             A tuple (updated presentation exchange record, presentation message)
 
         """
-
         # Get all credentials for this presentation
-        holder: IndyHolder = await self.context.inject(IndyHolder)
+        holder: BaseHolder = await self.context.inject(BaseHolder)
         credentials = {}
 
         # extract credential ids and non_revoked
@@ -394,7 +393,7 @@ class PresentationManager:
                         tails_local_path,
                     )
                 )
-            except IndyHolderError as e:
+            except HolderError as e:
                 LOGGER.error(
                     f"Failed to create revocation state: {e.error_code}, {e.message}"
                 )
@@ -571,7 +570,7 @@ class PresentationManager:
                                 identifier["timestamp"]
                             ] = found_rev_reg_entry
 
-        verifier: IndyVerifier = await self.context.inject(IndyVerifier)
+        verifier: BaseVerifier = await self.context.inject(BaseVerifier)
         presentation_exchange_record.verified = json.dumps(  # tag: needs string value
             await verifier.verify_presentation(
                 indy_proof_request,

@@ -4,17 +4,12 @@ import os
 import random
 import sys
 
-import json
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # noqa
 
 from runners.support.agent import DemoAgent, default_genesis_txns
 from runners.support.utils import log_timer, progress, require_indy
 
 LOGGER = logging.getLogger(__name__)
-
-
-TAILS_FILE_COUNT = int(os.getenv("TAILS_FILE_COUNT", 100))
 
 
 class BaseAgent(DemoAgent):
@@ -33,7 +28,6 @@ class BaseAgent(DemoAgent):
         self._connection_ready = None
         self.credential_state = {}
         self.credential_event = asyncio.Event()
-        self.revocations = []
         self.ping_state = {}
         self.ping_event = asyncio.Event()
         self.sent_pings = set()
@@ -47,19 +41,16 @@ class BaseAgent(DemoAgent):
         self._connection_id = conn_id
         self._connection_ready = asyncio.Future()
 
-    async def get_invite(self, auto_accept: bool = True):
+    async def get_invite(self, accept: str = "auto"):
         result = await self.admin_POST(
-            "/connections/create-invitation",
-            params={"auto_accept": json.dumps(auto_accept)},
+            "/connections/create-invitation", params={"accept": accept}
         )
         self.connection_id = result["connection_id"]
         return result["invitation"]
 
-    async def receive_invite(self, invite, auto_accept: bool = True):
+    async def receive_invite(self, invite, accept: str = "auto"):
         result = await self.admin_POST(
-            "/connections/receive-invitation",
-            invite,
-            params={"auto_accept": json.dumps(auto_accept)},
+            "/connections/receive-invitation", invite, params={"accept": accept}
         )
         self.connection_id = result["connection_id"]
         return self.connection_id
@@ -84,13 +75,8 @@ class BaseAgent(DemoAgent):
                 self._connection_ready.set_result(True)
 
     async def handle_issue_credential(self, payload):
-        cred_ex_id = payload["credential_exchange_id"]
-        rev_reg_id = payload.get("revoc_reg_id")
-        cred_rev_id = payload.get("revocation_id")
-
-        self.credential_state[cred_ex_id] = payload["state"]
-        if rev_reg_id and cred_rev_id:
-            self.revocations.append((rev_reg_id, cred_rev_id))
+        cred_id = payload["credential_exchange_id"]
+        self.credential_state[cred_id] = payload["state"]
         self.credential_event.set()
 
     async def handle_ping(self, payload):
@@ -170,9 +156,10 @@ class FaberAgent(BaseAgent):
         super().__init__("Faber", port, **kwargs)
         self.schema_id = None
         self.credential_definition_id = None
-        self.revocation_registry_id = None
+        self.extra_args = ["--monitor-ping"]
+        self.timing_log = "logs/faber_perf.log"
 
-    async def publish_defs(self, support_revocation: bool = False):
+    async def publish_defs(self):
         # create a schema
         self.log("Publishing test schema")
         version = format(
@@ -190,11 +177,7 @@ class FaberAgent(BaseAgent):
 
         # create a cred def for the schema
         self.log("Publishing test credential definition")
-        credential_definition_body = {
-            "schema_id": self.schema_id,
-            "support_revocation": support_revocation,
-            "revocation_registry_size": TAILS_FILE_COUNT,
-        }
+        credential_definition_body = {"schema_id": self.schema_id}
         credential_definition_response = await self.admin_POST(
             "/credential-definitions", credential_definition_body
         )
@@ -203,20 +186,7 @@ class FaberAgent(BaseAgent):
         ]
         self.log(f"Credential Definition ID: {self.credential_definition_id}")
 
-        # create revocation registry
-        # if support_revocation:
-        #     revoc_body = {
-        #         "credential_definition_id": self.credential_definition_id,
-        #     }
-        #     revoc_response = await self.admin_POST(
-        #         "/revocation/create-registry", revoc_body
-        #     )
-        #     self.revocation_registry_id = revoc_response["result"]["revoc_reg_id"]
-        #     self.log(f"Revocation Registry ID: {self.revocation_registry_id}")
-
-    async def send_credential(
-        self, cred_attrs: dict, comment: str = None, auto_remove: bool = True
-    ):
+    async def send_credential(self, cred_attrs: dict, comment: str = None):
         cred_preview = {
             "attributes": [{"name": n, "value": v} for (n, v) in cred_attrs.items()]
         }
@@ -227,14 +197,7 @@ class FaberAgent(BaseAgent):
                 "cred_def_id": self.credential_definition_id,
                 "credential_proposal": cred_preview,
                 "comment": comment,
-                "auto_remove": auto_remove,
-                "revoc_reg_id": self.revocation_registry_id,
             },
-        )
-
-    async def revoke_credential(self, cred_ex_id: str):
-        await self.admin_POST(
-            f"/issue-credential/records/{cred_ex_id}/revoke?publish=true"
         )
 
 
@@ -249,8 +212,6 @@ async def main(
     ping_only: bool = False,
     show_timing: bool = False,
     routing: bool = False,
-    revocation: bool = False,
-    tails_server_base_url: str = None,
     issue_count: int = 300,
 ):
 
@@ -269,13 +230,7 @@ async def main(
         alice = AliceAgent(start_port, genesis_data=genesis, timing=show_timing)
         await alice.listen_webhooks(start_port + 2)
 
-        faber = FaberAgent(
-            start_port + 3,
-            genesis_data=genesis,
-            timing=show_timing,
-            tails_server_base_url=tails_server_base_url,
-        )
-
+        faber = FaberAgent(start_port + 3, genesis_data=genesis, timing=show_timing)
         await faber.listen_webhooks(start_port + 5)
         await faber.register_did()
 
@@ -294,7 +249,7 @@ async def main(
 
         if not ping_only:
             with log_timer("Publish duration:"):
-                await faber.publish_defs(revocation)
+                await faber.publish_defs()
                 # await alice.set_tag_policy(faber.credential_definition_id, ["name"])
 
         with log_timer("Connect duration:"):
@@ -306,7 +261,7 @@ async def main(
             invite = await faber.get_invite()
 
             if routing:
-                conn_id = await alice.receive_invite(invite, auto_accept=False)
+                conn_id = await alice.receive_invite(invite, accept="manual")
                 await alice.establish_inbound(conn_id, alice_router_conn_id)
                 await alice.accept_invite(conn_id)
                 await asyncio.wait_for(alice.detect_connection(), 30)
@@ -339,7 +294,7 @@ async def main(
                 "age": "24",
             }
             asyncio.ensure_future(
-                faber.send_credential(attributes, comment, not revocation)
+                faber.send_credential(attributes, comment)
             ).add_done_callback(done_send)
 
         async def check_received_creds(agent, issue_count, pb):
@@ -434,7 +389,7 @@ async def main(
             except KeyboardInterrupt:
                 if receive_task:
                     receive_task.cancel()
-                print("Cancelled")
+                print("Canceled")
 
         recv_timer.stop()
         avg = recv_timer.duration / issue_count
@@ -450,13 +405,6 @@ async def main(
             await faber.collect_postgres_stats(f"{issue_count} {item_short}s")
             for line in faber.format_postgres_stats():
                 faber.log(line)
-
-        if revocation and faber.revocations:
-            (rev_reg_id, cred_rev_id) = next(iter(faber.revocations))
-            print(
-                f"Revoking and publishing cred rev id {cred_rev_id} "
-                f"from rev reg id {rev_reg_id}"
-            )
 
         if show_timing:
             timing = await alice.fetch_timing()
@@ -530,17 +478,6 @@ if __name__ == "__main__":
         help="Only send ping messages between the agents",
     )
     parser.add_argument(
-        "--revocation", action="store_true", help="Enable credential revocation"
-    )
-
-    parser.add_argument(
-        "--tails-server-base-url",
-        type=str,
-        metavar=("<tails-server-base-url>"),
-        help="Tals server base url",
-    )
-
-    parser.add_argument(
         "--routing", action="store_true", help="Enable inbound routing demonstration"
     )
     parser.add_argument(
@@ -565,8 +502,6 @@ if __name__ == "__main__":
                 args.ping,
                 args.timing,
                 args.routing,
-                args.revocation,
-                args.tails_server_base_url,
                 args.count,
             )
         )

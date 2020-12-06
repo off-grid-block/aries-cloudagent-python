@@ -233,6 +233,14 @@ class DebugGroup(ArgumentGroup):
             URL. Default: false.",
         )
         parser.add_argument(
+            "--invite-role",
+            dest="invite_role",
+            type=str,
+            metavar="<role>",
+            env_var="ACAPY_INVITE_ROLE",
+            help="Specify the role of the generated invitation.",
+        )
+        parser.add_argument(
             "--invite-label",
             dest="invite_label",
             type=str,
@@ -346,6 +354,8 @@ class DebugGroup(ArgumentGroup):
             settings["debug.seed"] = args.debug_seed
         if args.invite:
             settings["debug.print_invitation"] = True
+        if args.invite_role:
+            settings["debug.invite_role"] = args.invite_role
         if args.invite_label:
             settings["debug.invite_label"] = args.invite_label
         if args.invite_multi_use:
@@ -533,9 +543,7 @@ class LedgerGroup(ArgumentGroup):
     def get_settings(self, args: Namespace) -> dict:
         """Extract ledger settings."""
         settings = {}
-        if args.no_ledger:
-            settings["ledger.disabled"] = True
-        else:
+        if not args.no_ledger:
             if args.genesis_url:
                 settings["ledger.genesis_url"] = args.genesis_url
             elif args.genesis_file:

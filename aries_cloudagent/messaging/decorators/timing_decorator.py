@@ -82,7 +82,6 @@ class TimingDecoratorSchema(BaseModelSchema):
         required=False,
         description="Number of milliseconds to delay processing",
         example=1000,
-        strict=True,
     )
     wait_until_time = fields.Str(
         required=False,

@@ -6,7 +6,7 @@ from .....messaging.base_handler import (
     HandlerException,
     RequestContext,
 )
-from .....indy.holder import IndyHolder
+from .....holder.base import BaseHolder
 from .....storage.error import StorageNotFoundError
 
 from ..manager import PresentationManager
@@ -94,7 +94,7 @@ class PresentationRequestHandler(BaseHandler):
                 req_creds = await indy_proof_req_preview2indy_requested_creds(
                     indy_proof_request,
                     presentation_preview,
-                    holder=await context.inject(IndyHolder),
+                    holder=await context.inject(BaseHolder),
                 )
             except ValueError as err:
                 self._logger.warning(f"{err}")
